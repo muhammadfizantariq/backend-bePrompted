@@ -25,8 +25,11 @@ dotenv.config();
 const app = express();
 const PORT = process.env.PORT || 5000;
 
+// Allow your frontend domain
 app.use(cors({
-  origin: process.env.CORS_ORIGIN || 'http://localhost:3000',
+  origin: process.env.FRONTEND_URL || "https://beprompt-frontend.onrender.com", // frontend URL
+  methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+  credentials: true
 }));
 app.use(express.json());
 
