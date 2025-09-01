@@ -797,7 +797,7 @@ class ProfessionalReportGenerator {
 
 // Usage configuration
 const config = {
-    mongoUri: MONGODB_URI, // Replace with your MongoDB URI
+    mongoUri: process.env.MONGODB_URI,
     dbName: 'webdata',
     outputPath: path.join(__dirname, 'llm_visibility_report.pdf') // Fixed: Use path.join instead of path.resolve
 };
