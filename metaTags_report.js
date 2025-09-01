@@ -880,8 +880,8 @@ async function generateReport_1(reportPath) {
     console.error('❌ Error: No report path specified for generateReport_1.');
     return; // Exit if no path is given
   }
-  
-  const mongoUri = 'mongodb://localhost:27017'; // Replace with your MongoDB URI
+
+  const mongoUri = process.env.MONGODB_URI; // Replace with your MongoDB URI
   const generator = new GEOReportGenerator(mongoUri);
   
   try {

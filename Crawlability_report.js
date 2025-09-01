@@ -13,7 +13,7 @@ const MAX_PAGES = 20; // Maximum number of pages to crawl.
 const USER_AGENT = "LLM-Crawlability-Checker/1.0"; // Custom user agent for the bot.
 
 // --- MongoDB Settings (UPDATE THESE) ---
-const MONGO_URI = "mongodb://localhost:27017"; // Your MongoDB connection string.
+const MONGO_URI = process.env.MONGODB_URI;
 const DB_NAME = "webdata"; // The name of the database.
 const COLLECTION_NAME = "extractions_3"; // The name of the collection.
 

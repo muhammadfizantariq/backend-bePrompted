@@ -4,7 +4,7 @@ import { z } from 'zod';
 import 'dotenv/config';
 
 // CONFIG
-const MONGO_URI = 'mongodb://localhost:27017';
+const MONGO_URI = process.env.MONGODB_URI;
 const DB_NAME = 'webdata';
 const COLLECTION_NAME = 'extractions_3';
 
