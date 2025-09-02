@@ -1,5 +1,7 @@
 import nodemailer from 'nodemailer';
 import dotenv from 'dotenv';
+import fs from 'fs';
+import path from 'path';
 dotenv.config();
 
 const transporter = nodemailer.createTransport({
@@ -69,51 +71,41 @@ export async function sendFullAnalysisEmail({ to, url, reportDirectory, analysis
   // Get generated reports and collect PDF attachments
   const reports = [];
   const attachments = [];
+
+  // Helper: push attachment only if the file exists
+  const safePushAttachment = (filename, filePath) => {
+    if (!filePath) return;
+    try {
+      const fullPath = path.resolve(filePath);
+      if (fs.existsSync(fullPath)) {
+        attachments.push({ filename, path: fullPath });
+      } else {
+        console.warn(`⚠️ Attachment missing, skipping: ${filename} at ${fullPath}`);
+      }
+    } catch (e) {
+      console.warn(`⚠️ Could not verify attachment ${filename}: ${filePath} (${e.message})`);
+    }
+  };
   
   if (analysisResults?.steps?.professionalReport?.success) {
     reports.push(`📄 Professional Content Analysis Report`);
-    if (analysisResults.steps.professionalReport.path) {
-      attachments.push({
-        filename: 'WebsiteContent_report.pdf',
-        path: analysisResults.steps.professionalReport.path
-      });
-    }
+  safePushAttachment('WebsiteContent_report.pdf', analysisResults.steps.professionalReport.path);
   }
   if (analysisResults?.steps?.crawlabilityReport?.success) {
     reports.push(`🔍 Crawlability & Technical Report`);
-    if (analysisResults.steps.crawlabilityReport.path) {
-      attachments.push({
-        filename: 'llm_Crawlability_Report.pdf',
-        path: analysisResults.steps.crawlabilityReport.path
-      });
-    }
+  safePushAttachment('llm_Crawlability_Report.pdf', analysisResults.steps.crawlabilityReport.path);
   }
   if (analysisResults?.steps?.geoReport?.success) {
     reports.push(`🏷️ Meta Tags & GEO Report`);
-    if (analysisResults.steps.geoReport.path) {
-      attachments.push({
-        filename: 'metaTags_analysis.pdf',
-        path: analysisResults.steps.geoReport.path
-      });
-    }
+  safePushAttachment('metaTags_analysis.pdf', analysisResults.steps.geoReport.path);
   }
   if (analysisResults?.steps?.structuredDataReport?.success) {
     reports.push(`📊 Structured Data Report`);
-    if (analysisResults.steps.structuredDataReport.path) {
-      attachments.push({
-        filename: 'structuredDataAudit_report.pdf',
-        path: analysisResults.steps.structuredDataReport.path
-      });
-    }
+  safePushAttachment('structuredDataAudit_report.pdf', analysisResults.steps.structuredDataReport.path);
   }
   if (analysisResults?.steps?.faqReport?.success) {
     reports.push(`❓ FAQ Schema Report`);
-    if (analysisResults.steps.faqReport.path) {
-      attachments.push({
-        filename: 'faq_jsonld_report.pdf',
-        path: analysisResults.steps.faqReport.path
-      });
-    }
+  safePushAttachment('faq_jsonld_report.pdf', analysisResults.steps.faqReport.path);
   }
 
   const html = `
@@ -204,7 +196,7 @@ export async function sendFullAnalysisEmail({ to, url, reportDirectory, analysis
       console.log('📎 Attachments:', attachments.map(att => att.filename).join(', '));
     }
     
-    const info = await transporter.sendMail(mailOptions);
+  const info = await transporter.sendMail(mailOptions);
     console.log(`📧 Full analysis email sent to ${to}: ${info.messageId}`);
     if (info.accepted && info.accepted.length > 0) {
       console.log(`✅ Email accepted by: ${info.accepted.join(', ')}`);

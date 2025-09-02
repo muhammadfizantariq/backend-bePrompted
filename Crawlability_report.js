@@ -3,7 +3,8 @@ import fetch from 'node-fetch';
 import { JSDOM } from 'jsdom';
 import robotsParser from 'robots-parser';
 import fs from 'fs';
-import puppeteer from 'puppeteer';
+// Prefer shared HTML->PDF util with Puppeteer then wkhtmltopdf fallback
+import { htmlToPdf } from './utils/htmlToPdf.js';
 import path from 'path';
 
 // ==================== CONFIGURATION ====================
@@ -738,35 +739,13 @@ function generateHtmlReport(crawlData) {
  * @param {string} fullPdfPath - The full path where the PDF should be saved.
  */
 async function generatePdfReport(htmlContent, fullPdfPath) {
-    let browser;
     try {
         const resolvedPath = path.resolve(fullPdfPath);
-        const targetDir = path.dirname(resolvedPath);
-
-        if (!fs.existsSync(targetDir)) {
-            fs.mkdirSync(targetDir, { recursive: true });
-        }
-
-        browser = await puppeteer.launch({ headless: true, args: ['--no-sandbox', '--disable-setuid-sandbox'] });
-        const page = await browser.newPage();
-
-        await page.setContent(htmlContent, {
-            waitUntil: 'networkidle0'
-        });
-
-        await page.pdf({
-            path: resolvedPath,
-            format: 'A4',
-            printBackground: true
-        });
-
+        await htmlToPdf(htmlContent, resolvedPath);
         console.log(`📄 PDF report generated: ${resolvedPath}`);
     } catch (error) {
         console.error(`❌ Failed to generate PDF report:`, error);
-    } finally {
-        if (browser) {
-            await browser.close();
-        }
+        throw error;
     }
 }
 
@@ -898,6 +877,22 @@ export async function generateCrawlabilityPdfReport(targetUrl, pdfFilename) {
         if (dbClient) {
             await dbClient.close();
         }
+    }
+}
+
+// Convenience: generate report directly from provided crawl data (for tests/mock)
+export async function generateCrawlabilityPdfFromMock(crawlData, pdfFilename) {
+    if (!crawlData || !pdfFilename) {
+        console.error("❌ Both crawlData and pdfFilename must be provided.");
+        return null;
+    }
+    try {
+        const htmlReport = generateHtmlReport(crawlData);
+        await generatePdfReport(htmlReport, pdfFilename);
+        return path.resolve(pdfFilename);
+    } catch (error) {
+        console.error("❌ Failed to generate mock crawlability PDF:", error);
+        return null;
     }
 }
 

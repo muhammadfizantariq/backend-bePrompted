@@ -1,5 +1,5 @@
 import { MongoClient } from 'mongodb';
-import puppeteer from 'puppeteer';
+import { htmlToPdf } from './utils/htmlToPdf.js';
 
 class GEOReportGenerator {
   constructor(mongoUri, dbName = 'webdata', collectionName = 'extractions_3') {
@@ -832,36 +832,10 @@ async generatePDFReport(outputPath) { // MODIFICATION 1: Removed default value
       console.log('✅ HTML content generated');
       
       // Generate PDF using Puppeteer
-      console.log('🎨 Converting HTML to PDF...');
-      const browser = await puppeteer.launch({
-        headless: true,
-        args: [
-          '--no-sandbox', 
-          '--disable-setuid-sandbox',
-          '--disable-web-security',
-          '--disable-features=VizDisplayCompositor'
-        ]
-      });
-      
-      const page = await browser.newPage();
-      await page.setContent(htmlContent, { waitUntil: 'networkidle0' });
-      
-      const pdf = await page.pdf({
-        path: outputPath, 
-        format: 'A4',
-        printBackground: true,
-        preferCSSPageSize: false,
-        margin: { 
-          top: '20mm', 
-          bottom: '25mm', 
-          left: '15mm', 
-          right: '15mm' 
-        }
-      });
-      
-      await browser.close();
-      console.log(`✅ PDF report generated successfully: ${outputPath}`);
-      return pdf;
+            console.log('🎨 Converting HTML to PDF...');
+            await htmlToPdf(htmlContent, outputPath);
+            console.log(`✅ PDF report generated successfully: ${outputPath}`);
+            return outputPath;
       
     } catch (error) {
       console.error('❌ Error generating PDF report:', error.message);

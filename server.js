@@ -784,6 +784,9 @@ app.listen(PORT, () => {
   console.log(`   - JINA_API_KEY: ${process.env.JINA_API_KEY ? '✅' : '❌ Missing'}`);
   console.log(`   - Database: ${CONFIG.mongodb.dbName}`);
   console.log(`   - Collection: ${CONFIG.mongodb.collectionName}`);
+  if (process.env.PUPPETEER_EXECUTABLE_PATH || process.env.CHROME_EXECUTABLE_PATH) {
+    console.log(`   - Chrome Path: ${process.env.PUPPETEER_EXECUTABLE_PATH || process.env.CHROME_EXECUTABLE_PATH}`);
+  }
   
   // Debug MongoDB connection options
   const mongoOptions = CONFIG.mongodb.options;

@@ -1,5 +1,5 @@
 import { MongoClient } from 'mongodb';
-import puppeteer from 'puppeteer';
+import { htmlToPdf } from './utils/htmlToPdf.js';
 
 class StructuredDataReportGenerator {
   constructor(mongoUri, dbName = 'webdata', collectionName = 'extractions_3', mongoOptions = {}) {
@@ -762,31 +762,11 @@ class StructuredDataReportGenerator {
       const htmlContent = this.generateHTMLReport(documents, stats);
       console.log('✅ HTML content generated');
       
-      // Generate PDF using Puppeteer
-      console.log('🎨 Converting HTML to PDF...');
-      const browser = await puppeteer.launch({
-        headless: true,
-        args: ['--no-sandbox', '--disable-setuid-sandbox']
-      });
-      
-      const page = await browser.newPage();
-      await page.setContent(htmlContent, { waitUntil: 'networkidle0' });
-      
-      const pdf = await page.pdf({
-        path: outputPath,
-        format: 'A4',
-        printBackground: true,
-        margin: { 
-          top: '20mm', 
-          bottom: '20mm', 
-          left: '15mm', 
-          right: '15mm' 
-        }
-      });
-      
-      await browser.close();
-      console.log(`✅ PDF report generated successfully: ${outputPath}`);
-      return pdf;
+  // Generate PDF with Puppeteer or fallback to wkhtmltopdf
+  console.log('🎨 Converting HTML to PDF...');
+  await htmlToPdf(htmlContent, outputPath);
+  console.log(`✅ PDF report generated successfully: ${outputPath}`);
+  return outputPath;
       
     } catch (error) {
       console.error('❌ Error generating PDF report:', error.message);
