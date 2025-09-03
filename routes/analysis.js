@@ -1,4 +1,44 @@
 import express from 'express';
+import fetch from 'node-fetch';
+
+// Helper: normalize URL (prefer https). Returns {candidateUrls, input}
+function buildCandidateUrls(input) {
+  const raw = (input || '').trim();
+  if (!raw) return { input: raw, candidateUrls: [] };
+  // If already has protocol, use as-is only
+  if (/^https?:\/\//i.test(raw)) {
+    return { input: raw, candidateUrls: [raw] };
+  }
+  // Strip leading protocol-like text if malformed
+  const cleaned = raw.replace(/^\w+:\/\//, '');
+  // Prefer https first, then http
+  return {
+    input: raw,
+    candidateUrls: [
+      `https://${cleaned}`,
+      `http://${cleaned}`
+    ]
+  };
+}
+
+async function tryFetch(url, timeoutMs = 8000) {
+  const controller = new AbortController();
+  const t = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    // Try HEAD first
+    let res = await fetch(url, { method: 'HEAD', redirect: 'follow', signal: controller.signal });
+    if (!res.ok || res.status === 405) {
+      // Some servers don't support HEAD well; try GET lightweight
+      res = await fetch(url, { method: 'GET', redirect: 'follow', signal: controller.signal });
+    }
+    const finalUrl = res.url || url;
+    return { ok: true, status: res.status, finalUrl, redirected: res.redirected };
+  } catch (err) {
+    return { ok: false, error: err?.message || String(err) };
+  } finally {
+    clearTimeout(t);
+  }
+}
 
 // Export a function that creates the router with dependencies
 export default function createAnalysisRoutes(analysisQueue, ultimateAnalyzer) {
@@ -59,6 +99,36 @@ export default function createAnalysisRoutes(analysisQueue, ultimateAnalyzer) {
         error: `Server error: ${error.message}` 
       });
     }
+  });
+
+  // URL precheck (normalize + reachability)
+  router.post('/precheck-url', async (req, res) => {
+    const { url } = req.body || {};
+    const { candidateUrls, input } = buildCandidateUrls(url);
+    if (!candidateUrls.length) {
+      return res.status(400).json({ success: false, error: 'URL is required' });
+    }
+
+    for (const candidate of candidateUrls) {
+      const result = await tryFetch(candidate, 8000);
+      if (result.ok) {
+        return res.json({
+          success: true,
+          input,
+          normalizedUrl: candidate,
+          finalUrl: result.finalUrl,
+          status: result.status,
+          redirected: !!result.redirected
+        });
+      }
+    }
+
+    // If all variants failed, return the last error
+    return res.status(400).json({
+      success: false,
+      input,
+      error: 'URL not reachable. Please check the domain and try again.'
+    });
   });
 
   // Full analysis endpoint (with queue)
