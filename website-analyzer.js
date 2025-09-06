@@ -4,7 +4,8 @@ import axios from 'axios';
 import https from 'https';
 import { MongoClient } from 'mongodb';
 import { createRequire } from 'node:module';
-import puppeteer from 'puppeteer';
+// Use puppeteer-core so we rely on the system / injected Chromium (set via env)
+import puppeteer from 'puppeteer-core';
 
 
 import dotenv from 'dotenv';
@@ -97,11 +98,33 @@ export class WebsiteAnalyzer {
 async extractFromHTML(url) {
   // Method 1: Try Puppeteer first
   try {
+    if (process.env.DISABLE_PUPPETEER === 'true') {
+      throw new Error('Puppeteer disabled by DISABLE_PUPPETEER env flag');
+    }
     console.log('🚀 Attempting HTML extraction with Puppeteer...');
+
+    // Resolve executable path (supports Docker + various deploy targets)
+    const executablePath = process.env.PUPPETEER_EXECUTABLE_PATH ||
+                           process.env.CHROME_EXECUTABLE_PATH ||
+                           process.env.CHROMIUM_PATH ||
+                           '/usr/bin/chromium';
+
     const browser = await puppeteer.launch({
+      executablePath,
       headless: true,
-      args: ['--no-sandbox', '--disable-setuid-sandbox']
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-gpu',
+        '--disable-background-timer-throttling',
+        '--disable-renderer-backgrounding',
+        '--disable-backgrounding-occluded-windows',
+        '--no-first-run',
+        '--no-default-browser-check'
+      ]
     });
+    console.log(`🧭 Using Chromium at: ${executablePath}`);
     
     const page = await browser.newPage();
     await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36');

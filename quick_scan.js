@@ -6,7 +6,7 @@ import OpenAI from 'openai';
 import { z } from 'zod';
 import dotenv from 'dotenv';
 import path from 'path';
-import puppeteer from 'puppeteer';
+import puppeteer from 'puppeteer-core';
 
 const require = createRequire(import.meta.url);
 const cheerio = require('cheerio');
