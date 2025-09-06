@@ -1,6 +1,7 @@
 import express from 'express';
 import cors from 'cors';
 import { MongoClient } from 'mongodb';
+import mongoose from 'mongoose';
 import StructuredDataReportGenerator from './structuredData_report.js'
 import { analyzeWebsite } from './website-analyzer.js';
 import { analyzeWebsiteGeo } from './schemasAnalyzer.js';
@@ -19,6 +20,12 @@ import crypto from 'crypto';
 // Import route modules
 import paymentRoutes from './routes/payment.js';
 import createAnalysisRoutes from './routes/analysis.js';
+import authRoutes from './routes/auth.js';
+import adminContentRoutes from './routes/adminContent.js';
+import publicContentRoutes from './routes/contentPublic.js';
+import contactMessageRoutes from './routes/contactMessages.js';
+import { diagnosticTest } from './email.js';
+import AnalysisRecord from './models/AnalysisRecord.js';
 
 dotenv.config();
 
@@ -45,13 +52,20 @@ const PORT = process.env.PORT || 5000;
 // Allow your frontend domain
 app.use(cors({
   origin: process.env.FRONTEND_URL || "http://localhost:3000", // frontend URL
-  methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
   credentials: true
 }));
 app.use(express.json());
 
 // Use payment routes immediately
 app.use('/', paymentRoutes);
+// We'll mount /auth after a successful mongoose connection; provide temporary 503 handler
+app.use('/auth', (req, res, next) => {
+  if (!mongoose.connection || mongoose.connection.readyState !== 1) {
+    return res.status(503).json({ error: 'Database not connected (initializing).' });
+  }
+  return authRoutes(req, res, next);
+});
 
 const CONFIG = {
   openai: {
@@ -112,6 +126,82 @@ const CONFIG = {
   }
 };
 
+// --- MONGOOSE CONNECTION (for User auth models) ---
+let mongooseReady = false;
+mongoose.set('bufferCommands', false); // Fail fast instead of buffering 10s
+// Shorter buffer timeout to surface errors quickly (ms)
+mongoose.set('bufferTimeoutMS', 2000);
+async function connectMongoose() {
+  try {
+    const uri = CONFIG.mongodb.uri;
+    const options = {
+      dbName: CONFIG.mongodb.dbName,
+      autoIndex: true,
+      serverSelectionTimeoutMS: 15000,
+      maxPoolSize: 10
+    };
+    console.log(`🔌 Connecting to MongoDB via Mongoose -> ${uri} (db: ${CONFIG.mongodb.dbName})`);
+    await mongoose.connect(uri, options);
+    mongooseReady = true;
+    const host = mongoose.connection.host;
+    console.log(`✅ Mongoose connected: ${host}/${CONFIG.mongodb.dbName}`);
+    console.log(`   ReadyState: ${mongoose.connection.readyState}`);
+  } catch (err) {
+    console.error('❌ Failed to connect to MongoDB via Mongoose:', err.message);
+    console.error('   Registration & auth endpoints will fail until connection is established.');
+    // Retry logic (simple backoff)
+    setTimeout(connectMongoose, 5000);
+  }
+}
+connectMongoose();
+
+// Connection event listeners for better diagnostics
+mongoose.connection.on('error', err => {
+  console.error('💥 Mongoose connection error:', err.message);
+});
+mongoose.connection.on('disconnected', () => {
+  mongooseReady = false;
+  console.warn('⚠️ Mongoose disconnected. Attempting reconnection...');
+});
+mongoose.connection.on('reconnected', () => {
+  mongooseReady = true;
+  console.log('🔁 Mongoose reconnected.');
+});
+
+// Simple health endpoint (includes DB state)
+app.get('/health', (req, res) => {
+  res.json({
+    status: 'ok',
+    db: mongoose.connection.readyState === 1 ? 'connected' : 'not_connected',
+    dbReadyState: mongoose.connection.readyState,
+    timestamp: new Date().toISOString()
+  });
+});
+
+// Simple email diagnostics route (secured by DEBUG_TOKEN)
+app.get('/debug/email', async (req, res) => {
+  const token = req.headers['x-debug-token'];
+  if ((process.env.DEBUG_TOKEN || '') !== token) {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
+  const testRecipient = process.env.DEBUG_EMAIL_TO || process.env.SMTP_USER;
+  try {
+    const result = await diagnosticTest(testRecipient);
+    res.json({
+      environment: {
+        SMTP_HOST,
+        PRIMARY_PORT,
+        PRIMARY_SECURE,
+        FORCE_IPV4: process.env.SMTP_FORCE_IPV4 === '1',
+        RESEND_CONFIGURED: Boolean(process.env.RESEND_API_KEY)
+      },
+      result
+    });
+  } catch(e){
+    res.status(500).json({ error: e.message });
+  }
+});
+
 
 class AnalysisQueue {
   constructor() {
@@ -120,23 +210,27 @@ class AnalysisQueue {
     this.currentTask = null;
     this.processedUrls = new Set(); 
     this.queueLock = false;
+    // In-memory status tracking map keyed by taskId
+    this.taskStatuses = new Map();
   }
 
   async addTask(email, url, res) {
-    // Normalize URL to prevent duplicates
     const normalizedUrl = this.normalizeUrl(url);
     const taskId = this.generateTaskId(email, normalizedUrl);
-    
-    // Check if the same URL is already being processed or queued
-    const isDuplicate = this.queue.some(task => task.taskId === taskId) || 
-                       (this.currentTask && this.currentTask.taskId === taskId);
-    
-    if (isDuplicate) {
+
+    const existing = this.taskStatuses.get(taskId);
+    if (existing && ['queued','processing','sending_email'].includes(existing.status)) {
       console.log(`⚠️ Duplicate request detected for ${normalizedUrl} by ${email}. Rejecting.`);
-      return res.status(409).json({ 
-        success: false, 
-        error: 'This URL is already being processed. Please wait for the current analysis to complete.' 
-      });
+      // Respond duplicate if real response object
+      if (res && res.status) {
+        res.status(409).json({
+          success: false,
+            error: 'This URL is already being processed for this email.',
+            taskId,
+            status: existing
+        });
+      }
+      return { duplicate: true, taskId };
     }
 
     const task = {
@@ -144,28 +238,69 @@ class AnalysisQueue {
       email,
       url: normalizedUrl,
       res,
-      queuedAt: Date.now(), // When it was added to queue
+      queuedAt: Date.now(),
       retryCount: 0
     };
 
-    // Thread-safe queue addition
+    // Initialize status entry
+    this.taskStatuses.set(taskId, {
+      taskId,
+      email,
+      url: normalizedUrl,
+      createdAt: Date.now(),
+      status: 'queued', // queued | processing | completed | failed
+      emailStatus: 'pending', // pending | sending | sent | failed
+      updatedAt: Date.now()
+    });
+
+    // Persist record (best-effort; don't block queue if fails)
+    try {
+      const userDoc = await mongoose.model('User').findOne({ email }).select('_id');
+      if (userDoc) {
+        await AnalysisRecord.create({ user: userDoc._id, email, url: normalizedUrl, taskId });
+      }
+    } catch (persistErr) {
+      console.warn('⚠️ Failed to persist AnalysisRecord:', persistErr.message);
+    }
+
     while (this.queueLock) {
       await this.sleep(100);
     }
-    
     this.queueLock = true;
     this.queue.push(task);
     this.queueLock = false;
 
     console.log(`📥 Task ${taskId} added to queue. Position: ${this.queue.length}`);
     this.logQueueStatus();
+    if (!this.isProcessing) setImmediate(() => this.processQueue());
+    return { duplicate: false, taskId };
+  }
 
-    // Start processing if not already running
-    if (!this.isProcessing) {
-      setImmediate(() => this.processQueue());
-    }
+  updateStatus(taskId, patch) {
+    const current = this.taskStatuses.get(taskId);
+    if (!current) return;
+    const next = { ...current, ...patch, updatedAt: Date.now() };
+    this.taskStatuses.set(taskId, next);
+    // Persist delta asynchronously
+    (async () => {
+      try {
+        await AnalysisRecord.findOneAndUpdate(
+          { taskId },
+          { $set: { ...patch, updatedAt: new Date(), reportDirectory: patch.reportDirectory || current.reportDirectory } },
+          { new: false }
+        );
+      } catch (e) {
+        // Ignore persistence issues (in-memory status still works)
+      }
+    })();
+  }
 
-    return null; 
+  getTaskStatus(taskId) {
+    return this.taskStatuses.get(taskId) || null;
+  }
+
+  getStatusesForEmail(email) {
+    return Array.from(this.taskStatuses.values()).filter(s => s.email === email).sort((a,b)=>b.createdAt - a.createdAt);
   }
 
   async processQueue() {
@@ -191,7 +326,8 @@ class AnalysisQueue {
 
         if (!task) continue;
 
-        this.currentTask = task;
+  this.currentTask = task;
+  this.updateStatus(task.taskId, { status: 'processing' });
         
         // Generate timestamp when work actually starts (not when queued)
         task.processingStartedAt = Date.now();
@@ -222,7 +358,7 @@ class AnalysisQueue {
     const startTime = Date.now();
     
     try {
-      const result = await ultimateAnalyzer.runUltimateAnalysis(task.url, task.email, task);
+  const result = await ultimateAnalyzer.runUltimateAnalysis(task.url, task.email, task);
       
       // Send email notification after successful analysis
       if (result && result.success) {
@@ -230,6 +366,8 @@ class AnalysisQueue {
           console.log(`📧 Sending analysis results email to ${task.email}...`);
           console.log(`   Report directory: ${result.reportDirectory}`);
           
+          // Mark email sending started
+          this.updateStatus(task.taskId, { emailStatus: 'sending' });
           await sendFullAnalysisEmail({
             to: task.email,
             url: task.url,
@@ -237,6 +375,7 @@ class AnalysisQueue {
             analysisResults: result
           });
           console.log(`✅ Analysis results email sent successfully to ${task.email}`);
+          this.updateStatus(task.taskId, { emailStatus: 'sent', reportDirectory: result.reportDirectory });
         } catch (emailError) {
           console.error(`❌ Failed to send analysis email to ${task.email}:`, emailError.message);
           console.error(`   Email error details:`, {
@@ -245,11 +384,16 @@ class AnalysisQueue {
             commandUsed: emailError.command
           });
           // Don't fail the entire task if email fails - analysis was successful
+          this.updateStatus(task.taskId, { emailStatus: 'failed', emailError: emailError.message, reportDirectory: result.reportDirectory });
         }
       } else {
         console.warn(`⚠️ Skipping email send - analysis was not successful for ${task.email}`);
         if (result?.error) {
           console.warn(`   Analysis error: ${result.error}`);
+        }
+        // If analysis failed overall
+        if (!result?.success) {
+          this.updateStatus(task.taskId, { status: 'failed' });
         }
       }
       
@@ -261,11 +405,14 @@ class AnalysisQueue {
       }
       
       console.log(`✅ Task ${task.taskId} completed successfully in ${Date.now() - startTime}ms`);
+      if (result?.success) {
+        this.updateStatus(task.taskId, { status: 'completed' });
+      }
       
     } catch (error) {
       console.error(`💥 Task ${task.taskId} failed:`, error.message);
       
-      if (!task.res.headersSent) {
+  if (!task.res.headersSent) {
         task.res.status(500).json({
           success: false,
           error: 'Analysis failed due to server error',
@@ -273,6 +420,7 @@ class AnalysisQueue {
           processingTimeMs: Date.now() - startTime
         });
       }
+  this.updateStatus(task.taskId, { status: 'failed' });
     }
   }
 
@@ -302,13 +450,14 @@ class AnalysisQueue {
         taskId: task.taskId
       });
     }
+  this.updateStatus(task.taskId, { status: 'failed' });
   }
 
   async cleanupAfterTask(task) {
     console.log(`🧼 Cleaning up after task: ${task.taskId}`);
     try {
-      await deleteDatabase();
-      console.log('✅ Database cleaned successfully');
+  await clearWorkingCollection();
+  console.log('✅ Working collection cleaned successfully');
     } catch (error) {
       console.error('❌ Database cleanup failed:', error.message);
     }
@@ -324,8 +473,8 @@ class AnalysisQueue {
   }
 
   generateTaskId(email, url) {
-    const data = `${email}:${url}:${Date.now()}`;
-    return crypto.createHash('md5').update(data).digest('hex').substring(0, 8);
+  const data = `${email}:${url}`; // stable hash for duplicate detection
+  return crypto.createHash('md5').update(data).digest('hex').substring(0, 10);
   }
 
   isRetryableError(error) {
@@ -723,6 +872,27 @@ const ultimateAnalyzer = new UltimateAnalyzer();
 // Now that we have the dependencies, create and use analysis routes
 const analysisRoutes = createAnalysisRoutes(analysisQueue, ultimateAnalyzer);
 app.use('/', analysisRoutes);
+app.use('/admin', adminContentRoutes);
+app.use('/content', publicContentRoutes);
+app.use('/', contactMessageRoutes);
+
+// Endpoint to fetch persisted analyses for authenticated user
+app.get('/my-analyses', async (req, res) => {
+  try {
+    const authHeader = req.headers.authorization || '';
+    const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null;
+    if(!token) return res.status(401).json({ error: 'Missing token' });
+    // Reuse auth middleware logic minimally (decode JWT)
+    const jwt = await import('jsonwebtoken');
+    let payload;
+    try { payload = jwt.default.verify(token, process.env.JWT_SECRET || 'dev_secret'); } catch { return res.status(401).json({ error: 'Invalid token' }); }
+    const userId = payload.userId;
+    const records = await AnalysisRecord.find({ user: userId }).sort({ createdAt: -1 }).limit(50).lean();
+    res.json({ success: true, analyses: records });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
 
 async function deleteDatabase() {
   try {
@@ -748,6 +918,26 @@ async function deleteDatabase() {
     } else if (err.message.includes('tls') || err.message.includes('ssl')) {
       console.error('   💡 TLS/SSL connection issue - check connection string and certificates');
     }
+  }
+}
+
+// New: only clear the working extraction collection instead of dropping entire DB
+async function clearWorkingCollection() {
+  try {
+    const client = new MongoClient(CONFIG.mongodb.uri, CONFIG.mongodb.options);
+    await client.connect();
+    const db = client.db(CONFIG.mongodb.dbName);
+    const collectionName = CONFIG.mongodb.collectionName;
+    const collections = await db.listCollections({ name: collectionName }).toArray();
+    if (collections.length) {
+      await db.collection(collectionName).deleteMany({});
+      console.log(`🧹 Cleared collection '${collectionName}' (kept DB + other collections).`);
+    } else {
+      console.log(`ℹ️ Collection '${collectionName}' does not exist yet; nothing to clear.`);
+    }
+    await client.close();
+  } catch (err) {
+    console.error('❌ Failed to clear working collection:', err.message);
   }
 }
 
@@ -784,13 +974,13 @@ process.on('SIGQUIT', gracefulShutdown); // Quit signal
 // Handle uncaught exceptions gracefully
 process.on('uncaughtException', async (error) => {
   console.error('💥 Uncaught Exception:', error);
-  await deleteDatabase(); // Clean up
+  try { await clearWorkingCollection(); } catch {}
   process.exit(1);
 });
 
 process.on('unhandledRejection', async (reason, promise) => {
   console.error('💥 Unhandled Rejection at:', promise, 'reason:', reason);
-  await deleteDatabase(); // Clean up
+  try { await clearWorkingCollection(); } catch {}
   process.exit(1);
 });
 

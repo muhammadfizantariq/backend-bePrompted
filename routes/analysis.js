@@ -1,5 +1,6 @@
 import express from 'express';
 import fetch from 'node-fetch';
+import jwt from 'jsonwebtoken';
 
 // Helper: normalize URL (prefer https). Returns {candidateUrls, input}
 function buildCandidateUrls(input) {
@@ -44,6 +45,21 @@ async function tryFetch(url, timeoutMs = 8000) {
 export default function createAnalysisRoutes(analysisQueue, ultimateAnalyzer) {
   const router = express.Router();
 
+  // Helper: extract email from body or JWT (if user is authenticated)
+  function extractEmail(req, bodyEmail) {
+    if (bodyEmail) return bodyEmail;
+    const auth = req.headers.authorization || '';
+    if (auth.startsWith('Bearer ')) {
+      const token = auth.slice(7);
+      try {
+        const decoded = jwt.verify(token, process.env.JWT_SECRET || 'dev_secret');
+        // common payload key names
+        return decoded.email || decoded.userEmail || decoded.user || null;
+      } catch { /* ignore decode errors */ }
+    }
+    return null;
+  }
+
   // Queue status endpoint
   router.get('/queue-status', (req, res) => {
     if (analysisQueue) {
@@ -73,13 +89,10 @@ export default function createAnalysisRoutes(analysisQueue, ultimateAnalyzer) {
 
   // Quick scan endpoint
   router.post('/quick-scan', async (req, res) => {
-    const { email, url } = req.body;
-    
+    const { email: bodyEmail, url } = req.body || {};
+    const email = extractEmail(req, bodyEmail);
     if (!email || !url) {
-      return res.status(400).json({ 
-        success: false, 
-        error: 'Email and URL are required' 
-      });
+      return res.status(400).json({ success: false, error: 'Email and URL are required' });
     }
 
     try {
@@ -133,13 +146,10 @@ export default function createAnalysisRoutes(analysisQueue, ultimateAnalyzer) {
 
   // Full analysis endpoint (with queue)
   router.post('/analyze', async (req, res) => {
-    const { email, url } = req.body;
-    
+    const { email: bodyEmail, url } = req.body || {};
+    const email = extractEmail(req, bodyEmail);
     if (!email || !url) {
-      return res.status(400).json({ 
-        success: false, 
-        error: 'Email and URL are required' 
-      });
+      return res.status(400).json({ success: false, error: 'Email and URL are required' });
     }
 
     try {
@@ -155,16 +165,18 @@ export default function createAnalysisRoutes(analysisQueue, ultimateAnalyzer) {
         };
         
         // Add task to queue in background
-        analysisQueue.addTask(email, url, dummyRes).catch(error => {
-          console.error('Background queue error:', error);
-        });
-        
-        // Return immediate success response
+        const { duplicate, taskId } = await analysisQueue.addTask(email, url, dummyRes);
+        if (duplicate) {
+          return; // addTask already responded in duplicate case
+        }
+        // Return immediate success response with taskId
         res.json({
           success: true,
           message: 'Analysis queued successfully',
           email,
-          url
+          url,
+          taskId,
+          status: analysisQueue.getTaskStatus(taskId)
         });
         
       } else {
@@ -183,6 +195,23 @@ export default function createAnalysisRoutes(analysisQueue, ultimateAnalyzer) {
         });
       }
     }
+  });
+
+  // Get status for a specific taskId
+  router.get('/analysis-status/:taskId', (req, res) => {
+    if (!analysisQueue) return res.status(500).json({ error: 'Queue not available' });
+    const status = analysisQueue.getTaskStatus(req.params.taskId);
+    if (!status) return res.status(404).json({ error: 'Task not found' });
+    res.json({ success: true, status });
+  });
+
+  // Get statuses for all tasks for a given email (query param)
+  router.get('/analysis-status', (req, res) => {
+    const { email } = req.query;
+    if (!email) return res.status(400).json({ error: 'Email query param required' });
+    if (!analysisQueue) return res.status(500).json({ error: 'Queue not available' });
+    const statuses = analysisQueue.getStatusesForEmail(email);
+    res.json({ success: true, tasks: statuses });
   });
 
   return router;

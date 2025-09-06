@@ -1,60 +1,29 @@
+// CLEAN MINIMAL EMAIL MODULE (restored)
 import nodemailer from 'nodemailer';
 import dotenv from 'dotenv';
 import fs from 'fs';
 import path from 'path';
 dotenv.config();
 
+export const SMTP_HOST = process.env.SMTP_HOST || 'smtp.gmail.com';
+export const PRIMARY_PORT = Number(process.env.SMTP_PORT) || 587; // default STARTTLS
+export const PRIMARY_SECURE = PRIMARY_PORT === 465;
+const SMTP_USER = process.env.SMTP_USER;
+const SMTP_PASS = process.env.SMTP_PASS;
+
+if (!SMTP_USER || !SMTP_PASS) {
+  console.warn('⚠️ Missing SMTP_USER / SMTP_PASS. Emails may fail.');
+}
+
 const transporter = nodemailer.createTransport({
-  host: process.env.SMTP_HOST,
-  port: process.env.SMTP_PORT || 587,
-  secure: true,
-  auth: {
-    user: process.env.SMTP_USER,
-    pass: process.env.SMTP_PASS,
-  },
+  host: SMTP_HOST,
+  port: PRIMARY_PORT,
+  secure: PRIMARY_SECURE,
+  auth: SMTP_USER && SMTP_PASS ? { user: SMTP_USER, pass: SMTP_PASS } : undefined
 });
 
-export async function sendScanResultsEmail({ to, score, recommendations, pdfPath }) {
-  const subject = `Your AI Visibility Score & Next Steps from BePrompted.io`;
-  const html = `
-    <div style="font-family: Arial, sans-serif; color: #222;">
-      <h2>Hi there,</h2>
-      <p>Thank you for using BePrompted.io's Free Quick AI GEO Scan!</p>
-      <p>Your AI Findability Score: <strong style="font-size: 1.5em; color: #2563eb;">${score}/100</strong></p>
-      <p>Here's what we found and your next steps:</p>
-      <ul>
-        ${recommendations.map(rec => `<li>${rec}</li>`).join('')}
-      </ul>
-      <p>A full PDF report is attached for your records.</p>
-      <hr>
-      <p style="color: #555; font-size: 0.95em;">Our experts can help turn a score of ${score} into 90+. Pick a plan here to get started.</p>
-      <p style="color: #888; font-size: 0.85em;">We only use your URL for this one-time analysis. Unsubscribe anytime.</p>
-      <p style="margin-top: 2em; font-size: 0.9em;">Best regards,<br>BePrompted.io</p>
-    </div>
-  `;
-
-  const mailOptions = {
-    from: `noreply @ BePrompted.io <${process.env.SMTP_USER}>`,
-    to,
-    subject,
-    html,
-    attachments: pdfPath ? [{ filename: 'AI_Visibility_Report.pdf', path: pdfPath }] : [],
-  };
-
-  try {
-    const info = await transporter.sendMail(mailOptions);
-    console.log(`📧 Email sent to ${to}: ${info.messageId}`);
-    if (info.accepted && info.accepted.length > 0) {
-      console.log(`✅ Email accepted by: ${info.accepted.join(', ')}`);
-    }
-    if (info.rejected && info.rejected.length > 0) {
-      console.warn(`⚠️ Email rejected by: ${info.rejected.join(', ')}`);
-    }
-    return info;
-  } catch (err) {
-    console.error(`❌ Failed to send email to ${to}:`, err.message);
-    throw err;
-  }
+async function sendMailWithFallback(mailOptions) {
+  return transporter.sendMail(mailOptions);
 }
 
 // Enhanced email function for full analysis results (paid service)
@@ -194,7 +163,7 @@ export async function sendFullAnalysisEmail({ to, url, reportDirectory, analysis
       console.log('📎 Attachments:', attachments.map(att => att.filename).join(', '));
     }
     
-  const info = await transporter.sendMail(mailOptions);
+  const info = await sendMailWithFallback(mailOptions);
     console.log(`📧 Full analysis email sent to ${to}: ${info.messageId}`);
     if (info.accepted && info.accepted.length > 0) {
       console.log(`✅ Email accepted by: ${info.accepted.join(', ')}`);
@@ -210,4 +179,52 @@ export async function sendFullAnalysisEmail({ to, url, reportDirectory, analysis
     }
     throw err;
   }
+}
+
+// --- Auth related emails ---
+export async function sendVerificationEmail(to, token) {
+  const verifyLink = `${process.env.FRONTEND_URL || 'http://localhost:3000'}/verify-email?token=${token}`;
+  const html = `
+    <div style="font-family: Arial,sans-serif;">
+      <h2>Verify your email</h2>
+      <p>Thanks for signing up. Please verify your email address by clicking the button below:</p>
+      <p><a href="${verifyLink}" style="background:#6366f1;color:#fff;padding:12px 20px;border-radius:6px;text-decoration:none;display:inline-block">Verify Email</a></p>
+      <p>Or use this code/token: <strong>${token}</strong></p>
+      <p style="font-size:12px;color:#666;">If you didn't create an account, you can ignore this email.</p>
+    </div>`;
+  return sendMailWithFallback({ from: SMTP_USER, to, subject: 'Verify your email', html });
+}
+
+export async function sendPasswordResetEmail(to, token) {
+  const resetLink = `${process.env.FRONTEND_URL || 'http://localhost:3000'}/reset-password?token=${token}`;
+  const html = `
+    <div style="font-family: Arial,sans-serif;">
+      <h2>Password Reset Request</h2>
+      <p>We received a request to reset your password. Click the button below to continue:</p>
+      <p><a href="${resetLink}" style="background:#ef4444;color:#fff;padding:12px 20px;border-radius:6px;text-decoration:none;display:inline-block">Reset Password</a></p>
+      <p>Or use this token: <strong>${token}</strong></p>
+      <p style="font-size:12px;color:#666;">If you did not request this, you can safely ignore this email.</p>
+    </div>`;
+  return sendMailWithFallback({ from: SMTP_USER, to, subject: 'Password Reset', html });
+}
+
+// --- Diagnostics & Test Helpers ---
+export async function smtpVerify() {
+  return new Promise((resolve) => {
+    transporter.verify(function(err, success){
+      if(err) {
+        resolve({ ok: false, error: err.message, code: err.code });
+      } else {
+        resolve({ ok: true, success });
+      }
+    });
+  });
+}
+
+export async function diagnosticTest(to) {
+  const verify = await smtpVerify();
+  let sendResult = null; let sendError = null;
+  try { sendResult = await sendVerificationEmail(to, 'diagnostic-token'); }
+  catch(e){ sendError = { message: e.message, code: e.code }; }
+  return { verify, sendResult: sendResult ? { id: sendResult.messageId } : null, sendError, config: { host: SMTP_HOST, port: PRIMARY_PORT, secure: PRIMARY_SECURE } };
 }
