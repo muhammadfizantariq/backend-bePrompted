@@ -15,6 +15,8 @@ const analysisRecordSchema = new mongoose.Schema({
 
 analysisRecordSchema.index({ email: 1, createdAt: -1 });
 analysisRecordSchema.index({ taskId: 1 });
+// Efficient pagination per user
+analysisRecordSchema.index({ user: 1, createdAt: -1 });
 
 analysisRecordSchema.pre('save', function(next){
   this.updatedAt = new Date();

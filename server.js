@@ -882,13 +882,37 @@ app.get('/my-analyses', async (req, res) => {
     const authHeader = req.headers.authorization || '';
     const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null;
     if(!token) return res.status(401).json({ error: 'Missing token' });
-    // Reuse auth middleware logic minimally (decode JWT)
     const jwt = await import('jsonwebtoken');
     let payload;
     try { payload = jwt.default.verify(token, process.env.JWT_SECRET || 'dev_secret'); } catch { return res.status(401).json({ error: 'Invalid token' }); }
     const userId = payload.userId;
-    const records = await AnalysisRecord.find({ user: userId }).sort({ createdAt: -1 }).limit(50).lean();
-    res.json({ success: true, analyses: records });
+
+    // Pagination params
+    let page = parseInt(req.query.page || '1', 10);
+    let pageSize = parseInt(req.query.pageSize || '20', 10);
+    if (page < 1) page = 1;
+    if (pageSize < 1) pageSize = 20;
+    if (pageSize > 100) pageSize = 100; // hard cap
+
+    const filter = { user: userId };
+    const total = await AnalysisRecord.countDocuments(filter);
+    const totalPages = Math.ceil(total / pageSize) || 1;
+    const skip = (page - 1) * pageSize;
+    const records = await AnalysisRecord.find(filter)
+      .sort({ createdAt: -1 })
+      .skip(skip)
+      .limit(pageSize)
+      .lean();
+
+    res.json({
+      success: true,
+      analyses: records,
+      page,
+      pageSize,
+      total,
+      totalPages,
+      hasMore: page < totalPages
+    });
   } catch (e) {
     res.status(500).json({ error: e.message });
   }
