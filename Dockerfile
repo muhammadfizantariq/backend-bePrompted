@@ -40,8 +40,9 @@ COPY . .
 # Adjust ownership so non-root "node" user can write (e.g., create reports)
 RUN chown -R node:node /usr/src/app
 
-# Ensure reports directory exists (avoids runtime checks)
-RUN mkdir -p reports
+# Ensure reports directory exists (avoids runtime checks) 
+# ✅ Also give ownership to 'node' user
+RUN mkdir -p /usr/src/app/reports && chown -R node:node /usr/src/app/reports
 
 # Use the non-root 'node' user provided by base image for security
 USER node

@@ -23,6 +23,23 @@ import createAnalysisRoutes from './routes/analysis.js';
 dotenv.config();
 
 const app = express();
+
+// Base reports directory (can be overridden in environment)
+const REPORTS_BASE = process.env.REPORTS_DIR || './reports';
+
+// Ensure base reports directory exists at startup (handles permission issues early)
+async function ensureReportsBaseDir() {
+  try {
+    await fs.mkdir(REPORTS_BASE, { recursive: true });
+    console.log(`📁 Reports base directory ready: ${REPORTS_BASE}`);
+  } catch (err) {
+    console.error(`❌ Failed to create reports base directory '${REPORTS_BASE}': ${err.message}`);
+    if (err.code === 'EACCES') {
+      console.error('   🔐 Permission denied. If running in Docker, ensure the directory is writable or not mounted read-only.');
+      console.error('   💡 Fix: create the directory on host with correct permissions or avoid mounting it as root-only.');
+    }
+  }
+}
 const PORT = process.env.PORT || 5000;
 
 // Allow your frontend domain
@@ -479,7 +496,7 @@ class UltimateAnalyzer {
       const emailDir = email.replace(/[@.]/g, '_');
       
       // Keep your original path structure, only add unique suffix if collision detected
-      let baseReportDir = `./reports/${emailDir}/${hostname}_${timestamp}`;
+  let baseReportDir = `${REPORTS_BASE}/${emailDir}/${hostname}_${timestamp}`;
       reportDir = baseReportDir;
       
       // Check if directory already exists and add minimal unique suffix if needed
@@ -594,7 +611,8 @@ class UltimateAnalyzer {
       // Clean up failed directory if it was created
       if (reportDir) {
         try {
-          await fs.rmdir(reportDir, { recursive: true });
+          // Use fs.rm instead of deprecated fs.rmdir
+          await fs.rm(reportDir, { recursive: true, force: true });
           console.log(`🧹 Cleaned up failed report directory: ${reportDir}`);
         } catch (cleanupError) {
           console.warn('⚠️ Failed to cleanup report directory:', cleanupError.message);
@@ -776,6 +794,8 @@ process.on('unhandledRejection', async (reason, promise) => {
   process.exit(1);
 });
 
+// Prepare reports directory then start server
+ensureReportsBaseDir().then(() => {
 app.listen(PORT, () => {
   console.log(`🚀 Ultimate Analysis Server running on http://localhost:${PORT}`);
   console.log(`📋 Environment check:`);
@@ -801,6 +821,7 @@ app.listen(PORT, () => {
   console.log(`   - POST /analyze - Complete analysis with reports (~15-30 minutes)`);
   console.log(`   - GET /queue-status - Check current queue status`);
   console.log(`   - GET /health - Server health and configuration check`);
+});
 });
 
 export default app;
