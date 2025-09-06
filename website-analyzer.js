@@ -62,7 +62,6 @@ export class WebsiteAnalyzer {
   // --- Content Fetching ---
   async fetchViaJinaAI(url) {
     const encodedUrl = encodeURIComponent(url);
-
     return new Promise((resolve, reject) => {
       const options = {
         hostname: 'r.jina.ai',
@@ -70,14 +69,12 @@ export class WebsiteAnalyzer {
         method: 'GET',
         headers: {
           Authorization: `Bearer ${this.config.jinaApiKey}`,
-          Accept: 'text/plain',
-        },
+          Accept: 'text/plain'
+        }
       };
-
-      const req = https.request(options, (res) => {
+      const req = https.request(options, res => {
         let data = '';
-
-        res.on('data', (chunk) => (data += chunk));
+        res.on('data', c => data += c);
         res.on('end', () => {
           if (res.statusCode === 200) {
             console.log('✅ Fetched via Jina AI');
@@ -87,197 +84,116 @@ export class WebsiteAnalyzer {
           }
         });
       });
-
-      req.on('error', (e) => reject(e));
+      req.on('error', reject);
       req.end();
     });
   }
 
-
-// Replace your existing extractFromHTML method with this enhanced version
-async extractFromHTML(url) {
-  // Method 1: Try Puppeteer first
-  try {
-    if (process.env.DISABLE_PUPPETEER === 'true') {
-      throw new Error('Puppeteer disabled by DISABLE_PUPPETEER env flag');
-    }
-    console.log('🚀 Attempting HTML extraction with Puppeteer...');
-
-    // Resolve executable path (supports Docker + various deploy targets)
-    const executablePath = process.env.PUPPETEER_EXECUTABLE_PATH ||
-                           process.env.CHROME_EXECUTABLE_PATH ||
-                           process.env.CHROMIUM_PATH ||
-                           '/usr/bin/chromium';
-
-    const browser = await puppeteer.launch({
-      executablePath,
-      headless: true,
-      args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        '--disable-gpu',
-        '--disable-background-timer-throttling',
-        '--disable-renderer-backgrounding',
-        '--disable-backgrounding-occluded-windows',
-        '--no-first-run',
-        '--no-default-browser-check'
-      ]
-    });
-    console.log(`🧭 Using Chromium at: ${executablePath}`);
-    
-    const page = await browser.newPage();
-    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36');
-    
-    await page.goto(url, { 
-      waitUntil: 'networkidle2', 
-      timeout: 15000 
-    });
-
-    // Extract data using browser's DOM API
-    const extractedData = await page.evaluate(() => {
-      const getMeta = (attrName, attrValue) => {
-        const el = document.querySelector(`meta[${attrName}="${attrValue}"]`);
-        return el ? el.getAttribute('content') : null;
-      };
-
-      // JSON-LD extraction
-      const jsonLdScripts = [];
-      document.querySelectorAll('script[type="application/ld+json"]').forEach(script => {
-        try {
-          const parsed = JSON.parse(script.textContent.trim());
-          jsonLdScripts.push(parsed);
-        } catch (e) {
-          // Skip invalid JSON-LD
-        }
-      });
-
-      // Meta tags extraction
-      const metaTags = {
-        title: document.title?.trim() || null,
-        description: getMeta('name', 'description'),
-        keywords: getMeta('name', 'keywords'),
-        ogTitle: getMeta('property', 'og:title'),
-        ogDescription: getMeta('property', 'og:description'),
-        ogImage: getMeta('property', 'og:image')
-      };
-
-      // Extract links
-      const baseUrl = window.location.href;
-      const baseUrlObj = new URL(baseUrl);
-      const origin = baseUrlObj.origin;
-      const links = new Set();
-
-      document.querySelectorAll('a[href]').forEach(anchor => {
-        const href = anchor.getAttribute('href');
-        if (!href) return;
-
-        try {
-          const fullUrl = new URL(href, baseUrl);
-          
-          if (fullUrl.origin !== origin) return;
-          
-          const relativePath = fullUrl.pathname.replace(/\/$/, '');
-          const segments = relativePath.split('/').filter(Boolean);
-
-          if (segments.length === 0) return;
-          if (fullUrl.href === origin || fullUrl.href === origin + '/') return;
-
-          if (segments.length <= 2) {
-            fullUrl.hash = '';
-            const cleanUrl = fullUrl.href;
-            
-            if (!/[)\]"']+$/.test(cleanUrl)) {
-              links.add(cleanUrl);
-            }
-          }
-        } catch (e) {
-          // Skip invalid URLs
-        }
-      });
-
-      return {
-        jsonLd: jsonLdScripts,
-        metaTags,
-        actualLinks: Array.from(links)
-      };
-    });
-
-    await browser.close();
-    
-    console.log(`✅ Puppeteer extraction successful`);
-    console.log(`✅ Found ${extractedData.jsonLd.length} JSON-LD blocks`);
-    console.log(`✅ Found ${extractedData.actualLinks.length} actual links`);
-    console.log('✅ Meta tags extracted');
-    
-    return extractedData;
-
-  } catch (puppeteerError) {
-    console.warn('⚠️ Puppeteer extraction failed:', puppeteerError.message);
-    console.log('🔄 Falling back to Axios + Cheerio method...');
-
-    // Method 2: Fallback to Axios + Cheerio
+  async extractFromHTML(url) {
     try {
-      const response = await axios.get(url, {
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',
-          Accept: 'text/html,application/xhtml+xml',
-          'Accept-Language': 'en-US,en;q=0.9',
-        },
-        timeout: 10000,
-      });
-
-      const $ = cheerio.load(response.data);
-
-      // JSON-LD extraction with Cheerio
-      const jsonLdScripts = [];
-      $('script[type="application/ld+json"]').each((i, el) => {
-        const raw = $(el).html()?.trim();
+      if (process.env.DISABLE_PUPPETEER === 'true') {
+        throw new Error('Puppeteer disabled by DISABLE_PUPPETEER env flag');
+      }
+      console.log('🚀 Attempting HTML extraction with Puppeteer...');
+      const executablePath = process.env.PUPPETEER_EXECUTABLE_PATH || process.env.CHROME_EXECUTABLE_PATH || process.env.CHROMIUM_PATH || '/usr/bin/chromium';
+      let browser;
+      try {
+        browser = await puppeteer.launch({
+          executablePath,
+            headless: true,
+            args: [
+              '--no-sandbox',
+              '--disable-setuid-sandbox',
+              '--disable-dev-shm-usage',
+              '--disable-gpu',
+              '--no-first-run',
+              '--no-default-browser-check'
+            ]
+        });
+        console.log(`🧭 Using Chromium at: ${executablePath}`);
+        const page = await browser.newPage();
+        await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36');
         try {
-          const parsed = JSON.parse(raw);
-          jsonLdScripts.push(parsed);
-        } catch {
-          // Skip invalid JSON-LD
+          await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 20000 });
+        } catch (navErr) {
+          console.warn(`⚠️ First navigation failed (${navErr.message}), retrying...`);
+          await page.goto(url, { waitUntil: 'networkidle2', timeout: 25000 });
         }
-      });
-
-      // Meta tags extraction with Cheerio
-      const getMeta = (attrName, attrValue) =>
-        $(`meta[${attrName}="${attrValue}"]`).attr('content');
-
-      const metaTags = {
-        title: $('title').text()?.trim() || null,
-        description: getMeta('name', 'description'),
-        keywords: getMeta('name', 'keywords'),
-        ogTitle: getMeta('property', 'og:title'),
-        ogDescription: getMeta('property', 'og:description'),
-        ogImage: getMeta('property', 'og:image')
-      };
-
-      // Extract actual links from HTML using existing method
-      const actualLinks = this.extractLinksFromHTML($, url);
-
-      console.log('✅ Axios fallback extraction successful');
-      console.log(`✅ Found ${jsonLdScripts.length} JSON-LD blocks`);
-      console.log(`✅ Found ${actualLinks.length} actual links`);
-      console.log('✅ Meta tags extracted');
-
-      return {
-        jsonLd: jsonLdScripts,
-        metaTags,
-        actualLinks,
-      };
-
-    } catch (axiosError) {
-      console.error('❌ Both Puppeteer and Axios extraction failed');
-      console.error('Puppeteer error:', puppeteerError.message);
-      console.error('Axios error:', axiosError.message);
-      
-      // Return null to trigger the existing error handling in analyzeWebsite
-      return null;
+        const extractedData = await page.evaluate(() => {
+          const getMeta = (attrName, attrValue) => {
+            const el = document.querySelector(`meta[${attrName}="${attrValue}"]`);
+            return el ? el.getAttribute('content') : null;
+          };
+          const jsonLdScripts = [];
+          document.querySelectorAll('script[type="application/ld+json"]').forEach(script => {
+            try { jsonLdScripts.push(JSON.parse(script.textContent.trim())); } catch {}
+          });
+          const metaTags = {
+            title: document.title?.trim() || null,
+            description: getMeta('name','description'),
+            keywords: getMeta('name','keywords'),
+            ogTitle: getMeta('property','og:title'),
+            ogDescription: getMeta('property','og:description'),
+            ogImage: getMeta('property','og:image')
+          };
+          const baseUrl = window.location.href;
+          const origin = new URL(baseUrl).origin;
+            const links = new Set();
+            document.querySelectorAll('a[href]').forEach(a => {
+              const href = a.getAttribute('href');
+              if(!href) return;
+              try {
+                const fullUrl = new URL(href, baseUrl);
+                if(fullUrl.origin !== origin) return;
+                const rel = fullUrl.pathname.replace(/\/$/, '');
+                const segs = rel.split('/').filter(Boolean);
+                if(segs.length === 0 || segs.length > 2) return;
+                if(fullUrl.href === origin || fullUrl.href === origin + '/') return;
+                fullUrl.hash='';
+                const clean = fullUrl.href;
+                if(!/[)\]"']+$/.test(clean)) links.add(clean);
+              } catch {}
+            });
+          return { jsonLd: jsonLdScripts, metaTags, actualLinks: Array.from(links) };
+        });
+        await browser.close();
+        console.log('✅ Puppeteer extraction successful');
+        return extractedData;
+      } catch(inner){
+        if(browser){ try { await browser.close(); } catch {} }
+        throw inner;
+      }
+    } catch(puppeteerError) {
+      console.warn('⚠️ Puppeteer extraction failed:', puppeteerError.message);
+      console.log('🔄 Falling back to Axios + Cheerio...');
+      try {
+        const response = await axios.get(url, { headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' }, timeout: 12000 });
+        const $ = cheerio.load(response.data);
+        const jsonLdScripts = [];
+        $('script[type="application/ld+json"]').each((i, el) => {
+          const raw = $(el).html()?.trim();
+          if(!raw) return; try { jsonLdScripts.push(JSON.parse(raw)); } catch {}
+        });
+        const getMeta = (attrName, attrValue) => $(`meta[${attrName}="${attrValue}"]`).attr('content');
+        const metaTags = {
+          title: $('title').text()?.trim() || null,
+          description: getMeta('name','description'),
+          keywords: getMeta('name','keywords'),
+          ogTitle: getMeta('property','og:title'),
+          ogDescription: getMeta('property','og:description'),
+          ogImage: getMeta('property','og:image')
+        };
+        const actualLinks = this.extractLinksFromHTML($, url);
+        console.log('✅ Axios fallback extraction successful');
+        return { jsonLd: jsonLdScripts, metaTags, actualLinks };
+      } catch(axiosError) {
+        console.error('❌ Both Puppeteer and Axios failed');
+        console.error('Puppeteer error:', puppeteerError.message);
+        console.error('Axios error:', axiosError.message);
+        return { jsonLd: [], metaTags: {}, actualLinks: [], partial: true, error: 'HTML extraction failed (Puppeteer & Axios)' };
+      }
     }
   }
-}
   // --- Link Extraction Utilities ---
   extractLinksFromHTML($, baseUrl) {
     const baseUrlObj = new URL(baseUrl);
@@ -441,7 +357,12 @@ async extractFromHTML(url) {
     try {
       jinaContent = await this.fetchViaJinaAI(targetUrl);
       htmlData = await this.extractFromHTML(targetUrl);
-      if (!htmlData) throw new Error('HTML extraction failed');
+      if (!htmlData || (htmlData.partial && !jinaContent)) {
+        throw new Error('HTML extraction failed');
+      }
+      if (htmlData.partial && jinaContent) {
+        console.warn('⚠️ Proceeding with Jina-only fallback (no structured HTML extracted).');
+      }
     } catch (err) {
       errorMsg = err.message;
       console.error(`❌ Error analyzing ${targetUrl}:`, errorMsg);
@@ -460,7 +381,8 @@ async extractFromHTML(url) {
       metaTags: htmlData.metaTags,
       jinaContent: jinaContent || null,
       actualLinks: htmlData.actualLinks || [],
-      status: 'done',
+  status: htmlData.partial ? 'partial' : 'done',
+  extractionMode: htmlData.partial ? 'jina_only' : 'browser',
       processedAt: new Date(),
     };
 

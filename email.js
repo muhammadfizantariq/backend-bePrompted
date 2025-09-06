@@ -66,7 +66,6 @@ export async function sendFullAnalysisEmail({ to, url, reportDirectory, analysis
   const hasValidScore = finalScore && finalScore !== 'N/A' && !isNaN(finalScore);
   const websiteAnalysis = analysisResults?.steps?.website?.success ? '✅ Complete' : '❌ Failed';
   const geoAnalysis = analysisResults?.steps?.geo?.overallSuccess ? '✅ Complete' : '❌ Failed';
-  const riskAnalysis = analysisResults?.steps?.riskClaims?.success ? '✅ Complete' : '❌ Failed';
   
   // Get generated reports and collect PDF attachments
   const reports = [];
@@ -130,7 +129,6 @@ export async function sendFullAnalysisEmail({ to, url, reportDirectory, analysis
           <ul style="list-style: none; padding: 0; margin: 0;">
             <li style="padding: 0.5rem 0; border-bottom: 1px solid #e2e8f0;">Website Structure Analysis: ${websiteAnalysis}</li>
             <li style="padding: 0.5rem 0; border-bottom: 1px solid #e2e8f0;">GEO Schema Analysis: ${geoAnalysis}</li>
-            <li style="padding: 0.5rem 0; border-bottom: 1px solid #e2e8f0;">Risk & Claims Analysis: ${riskAnalysis}</li>
             <li style="padding: 0.5rem 0;">AI Scoring & Recommendations: ✅ Complete</li>
           </ul>
         </div>
