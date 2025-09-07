@@ -178,6 +178,38 @@ app.get('/health', (req, res) => {
   });
 });
 
+// Admin: Re-run an analysis (enqueue new task) using original record's email + URL
+app.post('/admin/analysis/:id/rerun', async (req, res) => {
+  try {
+    const authHeader = req.headers.authorization || '';
+    const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null;
+    if(!token) return res.status(401).json({ error: 'Missing token' });
+    const jwt = await import('jsonwebtoken');
+    let payload; try { payload = jwt.default.verify(token, process.env.JWT_SECRET || 'dev_secret'); } catch { return res.status(401).json({ error: 'Invalid token' }); }
+    if((payload.role||'user') !== 'admin') return res.status(403).json({ error: 'Forbidden' });
+    const rec = await AnalysisRecord.findById(req.params.id);
+    if(!rec) return res.status(404).json({ error: 'Record not found' });
+    if(!rec.email || !rec.url) return res.status(400).json({ error: 'Record missing email or url' });
+    // Enqueue new task via queue (bypass duplicate detection by appending timestamp to generate unique taskId)
+    const uniqueUrl = rec.url; // keep same normalized URL; duplicate logic uses taskId(email+url)
+    // Temporarily modify queue to allow re-run: generate taskId with random suffix
+    const originalGenerate = analysisQueue.generateTaskId?.bind(analysisQueue);
+    const suffix = '-' + Date.now().toString(36);
+    analysisQueue.generateTaskId = (email, url) => originalGenerate ? originalGenerate(email, url) + suffix : (email + ':' + url + suffix);
+    const { duplicate, taskId } = await analysisQueue.addTask(rec.email, uniqueUrl, null);
+    // Restore original generator
+    if (originalGenerate) analysisQueue.generateTaskId = originalGenerate;
+    if(duplicate) return res.status(409).json({ error: 'Duplicate task (unexpected)' });
+    // Optionally link old record to new task
+    rec.rerunTaskId = taskId;
+    await rec.save();
+    res.json({ success: true, message: 'Analysis re-queued', newTaskId: taskId });
+  } catch(e){
+    console.error('Rerun analysis error:', e.message);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+
 // Simple email diagnostics route (secured by DEBUG_TOKEN)
 app.get('/debug/email', async (req, res) => {
   const token = req.headers['x-debug-token'];
@@ -286,6 +318,10 @@ class AnalysisQueue {
   updateStatus(taskId, patch) {
     const current = this.taskStatuses.get(taskId);
     if (!current) return;
+    // Auto-upgrade status to completed if email sent but status not explicitly provided or still processing
+    if (patch.emailStatus === 'sent' && (!patch.status || current.status !== 'completed')) {
+      patch.status = 'completed';
+    }
     const next = { ...current, ...patch, updatedAt: Date.now() };
     this.taskStatuses.set(taskId, next);
     // Persist delta asynchronously
@@ -992,11 +1028,26 @@ app.get('/my-analyses', async (req, res) => {
     const total = await AnalysisRecord.countDocuments(filter);
     const totalPages = Math.ceil(total / pageSize) || 1;
     const skip = (page - 1) * pageSize;
-    const records = await AnalysisRecord.find(filter)
+    let records = await AnalysisRecord.find(filter)
       .sort({ createdAt: -1 })
       .skip(skip)
       .limit(pageSize)
       .lean();
+
+    // Hide internal fields like reportDirectory (not needed client-side per new requirement)
+    records = records.map(r => ({
+      _id: r._id,
+      user: r.user,
+      email: r.email,
+      url: r.url,
+      taskId: r.taskId,
+      status: r.status,
+      emailStatus: r.emailStatus,
+      emailError: r.emailError,
+      failureReason: r.failureReason,
+      createdAt: r.createdAt,
+      updatedAt: r.updatedAt
+    }));
 
     res.json({
       success: true,
@@ -1154,6 +1205,11 @@ app.listen(PORT, () => {
         }
       }
       console.log(`🔁 Reconciled ${restored}/${recent.length} recent analyses into memory.`);
+      // Data fix: ensure all records with email sent but non-completed status are updated
+      const fixResult = await AnalysisRecord.updateMany({ emailStatus: 'sent', status: { $ne: 'completed' } }, { $set: { status: 'completed' } });
+      if (fixResult.modifiedCount) {
+        console.log(`🛠️ Fixed ${fixResult.modifiedCount} records with emailStatus=sent but status!=completed`);
+      }
     } catch (e) {
       console.warn('⚠️ Auto reconciliation failed:', e.message);
     }
