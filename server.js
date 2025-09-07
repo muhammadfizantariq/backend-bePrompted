@@ -253,12 +253,10 @@ class AnalysisQueue {
       updatedAt: Date.now()
     });
 
-    // Persist record (best-effort; don't block queue if fails)
+    // Persist record (always create a record; if user unknown, skip user ref)
     try {
       const userDoc = await mongoose.model('User').findOne({ email }).select('_id');
-      if (userDoc) {
-        await AnalysisRecord.create({ user: userDoc._id, email, url: normalizedUrl, taskId });
-      }
+      await AnalysisRecord.create({ user: userDoc?._id, email, url: normalizedUrl, taskId, status: 'queued', emailStatus: 'pending' });
     } catch (persistErr) {
       console.warn('⚠️ Failed to persist AnalysisRecord:', persistErr.message);
     }
@@ -875,6 +873,43 @@ app.use('/', analysisRoutes);
 app.use('/admin', adminContentRoutes);
 app.use('/content', publicContentRoutes);
 app.use('/', contactMessageRoutes);
+
+// Reconcile endpoint: rebuild in-memory statuses from DB (e.g., after restart)
+app.post('/reconcile-analyses', async (req, res) => {
+  try {
+    const authHeader = req.headers.authorization || '';
+    const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null;
+    // Simple admin gate via env token
+    if (!token || token !== (process.env.RECONCILE_TOKEN || '')) {
+      return res.status(403).json({ error: 'Forbidden' });
+    }
+    const cutoffMs = Date.now() - (1000 * 60 * 60 * 24 * 7); // 7 days lookback
+    const recent = await AnalysisRecord.find({ createdAt: { $gte: new Date(cutoffMs) } }).lean();
+    let restored = 0;
+    for (const rec of recent) {
+      // Only restore if not terminal OR recently updated (<24h) for visibility
+      const terminal = ['completed','failed'].includes(rec.status);
+      const ageMs = Date.now() - new Date(rec.updatedAt).getTime();
+      if (!analysisQueue.taskStatuses.has(rec.taskId) && (!terminal || ageMs < 24*3600*1000)) {
+        analysisQueue.taskStatuses.set(rec.taskId, {
+          taskId: rec.taskId,
+            email: rec.email,
+            url: rec.url,
+            createdAt: new Date(rec.createdAt).getTime(),
+            status: rec.status,
+            emailStatus: rec.emailStatus || 'pending',
+            reportDirectory: rec.reportDirectory,
+            emailError: rec.emailError,
+            updatedAt: new Date(rec.updatedAt).getTime()
+        });
+        restored++;
+      }
+    }
+    res.json({ success: true, restored, totalConsidered: recent.length });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
 
 // Endpoint to fetch persisted analyses for authenticated user
 app.get('/my-analyses', async (req, res) => {

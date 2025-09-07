@@ -9,6 +9,7 @@ const analysisRecordSchema = new mongoose.Schema({
   emailStatus: { type: String, enum: ['pending','sending','sent','failed'], default: 'pending' },
   reportDirectory: { type: String },
   emailError: { type: String },
+  failureReason: { type: String },
   createdAt: { type: Date, default: Date.now },
   updatedAt: { type: Date, default: Date.now }
 });
