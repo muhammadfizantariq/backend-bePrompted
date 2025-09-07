@@ -242,14 +242,23 @@ class AnalysisQueue {
       retryCount: 0
     };
 
-    // Initialize status entry
+    // We'll look up user id *before* creating in-memory entry so we can retain it for possible upsert reconstruction later
+    let userIdForMemory = null;
+    try {
+      const userDocCheck = await mongoose.model('User').findOne({ email }).select('_id');
+      if (userDocCheck) userIdForMemory = userDocCheck._id.toString();
+    } catch {}
+
+    // Initialize status entry (include user id if known for reliable upserts)
     this.taskStatuses.set(taskId, {
       taskId,
       email,
       url: normalizedUrl,
+      user: userIdForMemory,
       createdAt: Date.now(),
       status: 'queued', // queued | processing | completed | failed
       emailStatus: 'pending', // pending | sending | sent | failed
+      reportDirectory: null,
       updatedAt: Date.now()
     });
 
@@ -284,10 +293,27 @@ class AnalysisQueue {
       try {
         const persist = async (attempt=1) => {
           try {
-            await AnalysisRecord.findOneAndUpdate(
+            // Ensure required fields for upsert path
+            const baseOnInsert = {
+              taskId,
+              email: current.email,
+              url: current.url,
+              createdAt: current.createdAt ? new Date(current.createdAt) : new Date(),
+            };
+            if (current.user) baseOnInsert.user = current.user;
+            await AnalysisRecord.updateOne(
               { taskId },
-              { $set: { ...patch, updatedAt: new Date(), reportDirectory: patch.reportDirectory || current.reportDirectory } },
-              { upsert: true, new: false }
+              {
+                $set: {
+                  status: next.status,
+                  emailStatus: next.emailStatus,
+                  reportDirectory: next.reportDirectory || current.reportDirectory || null,
+                  emailError: next.emailError || null,
+                  updatedAt: new Date()
+                },
+                $setOnInsert: baseOnInsert
+              },
+              { upsert: true }
             );
           } catch (err) {
             if (attempt < 3) {
