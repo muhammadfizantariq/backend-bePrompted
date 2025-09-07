@@ -22,6 +22,49 @@ const transporter = nodemailer.createTransport({
   auth: SMTP_USER && SMTP_PASS ? { user: SMTP_USER, pass: SMTP_PASS } : undefined
 });
 
+export async function sendScanResultsEmail({ to, score, recommendations, pdfPath }) {
+  const subject = `Your AI Visibility Score & Next Steps from BePrompted.io`;
+  const html = `
+    <div style="font-family: Arial, sans-serif; color: #222;">
+      <h2>Hi there,</h2>
+      <p>Thank you for using BePrompted.io's Free Quick AI GEO Scan!</p>
+      <p>Your AI Findability Score: <strong style="font-size: 1.5em; color: #2563eb;">${score}/100</strong></p>
+      <p>Here's what we found and your next steps:</p>
+      <ul>
+        ${recommendations.map(rec => `<li>${rec}</li>`).join('')}
+      </ul>
+      <p>A full PDF report is attached for your records.</p>
+      <hr>
+      <p style="color: #555; font-size: 0.95em;">Our experts can help turn a score of ${score} into 90+. Pick a plan here to get started.</p>
+      <p style="color: #888; font-size: 0.85em;">We only use your URL for this one-time analysis. Unsubscribe anytime.</p>
+      <p style="margin-top: 2em; font-size: 0.9em;">Best regards,<br>BePrompted.io</p>
+    </div>
+  `;
+
+  const mailOptions = {
+    from: `noreply @ BePrompted.io <${process.env.SMTP_USER}>`,
+    to,
+    subject,
+    html,
+    attachments: pdfPath ? [{ filename: 'AI_Visibility_Report.pdf', path: pdfPath }] : [],
+  };
+
+  try {
+    const info = await transporter.sendMail(mailOptions);
+    console.log(`📧 Email sent to ${to}: ${info.messageId}`);
+    if (info.accepted && info.accepted.length > 0) {
+      console.log(`✅ Email accepted by: ${info.accepted.join(', ')}`);
+    }
+    if (info.rejected && info.rejected.length > 0) {
+      console.warn(`⚠️ Email rejected by: ${info.rejected.join(', ')}`);
+    }
+    return info;
+  } catch (err) {
+    console.error(`❌ Failed to send email to ${to}:`, err.message);
+    throw err;
+  }
+}
+
 async function sendMailWithFallback(mailOptions) {
   return transporter.sendMail(mailOptions);
 }
