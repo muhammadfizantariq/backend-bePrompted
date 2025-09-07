@@ -282,11 +282,23 @@ class AnalysisQueue {
     // Persist delta asynchronously
     (async () => {
       try {
-        await AnalysisRecord.findOneAndUpdate(
-          { taskId },
-          { $set: { ...patch, updatedAt: new Date(), reportDirectory: patch.reportDirectory || current.reportDirectory } },
-          { new: false }
-        );
+        const persist = async (attempt=1) => {
+          try {
+            await AnalysisRecord.findOneAndUpdate(
+              { taskId },
+              { $set: { ...patch, updatedAt: new Date(), reportDirectory: patch.reportDirectory || current.reportDirectory } },
+              { upsert: true, new: false }
+            );
+          } catch (err) {
+            if (attempt < 3) {
+              const delay = attempt * 200;
+              await new Promise(r=>setTimeout(r, delay));
+              return persist(attempt+1);
+            }
+            console.warn(`⚠️ Persist status failed after retries for ${taskId}:`, err.message);
+          }
+        };
+        await persist();
       } catch (e) {
         // Ignore persistence issues (in-memory status still works)
       }
@@ -920,7 +932,27 @@ app.get('/my-analyses', async (req, res) => {
     const jwt = await import('jsonwebtoken');
     let payload;
     try { payload = jwt.default.verify(token, process.env.JWT_SECRET || 'dev_secret'); } catch { return res.status(401).json({ error: 'Invalid token' }); }
-    const userId = payload.userId;
+    const userId = payload.userId || payload.id || payload._id; // support all token shapes
+    const userEmail = payload.email || payload.userEmail;
+    if(!userId && !userEmail){
+      return res.status(401).json({ error: 'Token missing user identity' });
+    }
+
+    // Ensure we have a userId if only email present
+    let resolvedUserId = userId;
+    if(!resolvedUserId && userEmail){
+      try {
+        const userDoc = await mongoose.model('User').findOne({ email: userEmail }).select('_id');
+        if(userDoc) resolvedUserId = userDoc._id.toString();
+      } catch {}
+    }
+
+    // Backfill: attach user id to records missing it
+    if(resolvedUserId && userEmail){
+      try {
+        await AnalysisRecord.updateMany({ email: userEmail, $or:[ { user: { $exists: false } }, { user: null } ] }, { $set: { user: resolvedUserId } });
+      } catch {}
+    }
 
     // Pagination params
     let page = parseInt(req.query.page || '1', 10);
@@ -928,8 +960,9 @@ app.get('/my-analyses', async (req, res) => {
     if (page < 1) page = 1;
     if (pageSize < 1) pageSize = 20;
     if (pageSize > 100) pageSize = 100; // hard cap
-
-    const filter = { user: userId };
+    
+    // Query: records for this userId OR (fallback) email match
+    const filter = resolvedUserId ? { $or: [ { user: resolvedUserId }, { $and: [ { email: userEmail }, { user: { $exists: false } } ] } ] } : { email: userEmail };
     const total = await AnalysisRecord.countDocuments(filter);
     const totalPages = Math.ceil(total / pageSize) || 1;
     const skip = (page - 1) * pageSize;
@@ -1070,6 +1103,35 @@ app.listen(PORT, () => {
   console.log(`   - POST /analyze - Complete analysis with reports (~15-30 minutes)`);
   console.log(`   - GET /queue-status - Check current queue status`);
   console.log(`   - GET /health - Server health and configuration check`);
+
+  // Auto reconcile recent analyses into in-memory map (last 72h)
+  (async () => {
+    try {
+      const windowMs = 72 * 3600 * 1000; // 72h
+      const since = new Date(Date.now() - windowMs);
+      const recent = await AnalysisRecord.find({ createdAt: { $gte: since } }).lean();
+      let restored = 0;
+      for (const rec of recent) {
+        if (!analysisQueue.taskStatuses.has(rec.taskId)) {
+          analysisQueue.taskStatuses.set(rec.taskId, {
+            taskId: rec.taskId,
+            email: rec.email,
+            url: rec.url,
+            createdAt: new Date(rec.createdAt).getTime(),
+            status: rec.status,
+            emailStatus: rec.emailStatus || 'pending',
+            reportDirectory: rec.reportDirectory,
+            emailError: rec.emailError,
+            updatedAt: new Date(rec.updatedAt).getTime()
+          });
+          restored++;
+        }
+      }
+      console.log(`🔁 Reconciled ${restored}/${recent.length} recent analyses into memory.`);
+    } catch (e) {
+      console.warn('⚠️ Auto reconciliation failed:', e.message);
+    }
+  })();
 });
 });
 

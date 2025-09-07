@@ -1,7 +1,7 @@
 import mongoose from 'mongoose';
 
 const analysisRecordSchema = new mongoose.Schema({
-  user: { type: mongoose.Schema.Types.ObjectId, ref: 'User', index: true, required: true },
+  user: { type: mongoose.Schema.Types.ObjectId, ref: 'User', index: true, required: false },
   email: { type: String, index: true },
   url: { type: String, required: true },
   taskId: { type: String, index: true },
