@@ -178,34 +178,28 @@ app.get('/health', (req, res) => {
   });
 });
 
-// Admin: Re-run an analysis (enqueue new task) using original record's email + URL
+// Admin: Re-run an analysis IN-PLACE (reuse existing record & taskId)
+// This resets the record's status/emailStatus and queues a fresh processing cycle.
 app.post('/admin/analysis/:id/rerun', async (req, res) => {
   try {
     const authHeader = req.headers.authorization || '';
     const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null;
-    if(!token) return res.status(401).json({ error: 'Missing token' });
+    if (!token) return res.status(401).json({ error: 'Missing token' });
     const jwt = await import('jsonwebtoken');
     let payload; try { payload = jwt.default.verify(token, process.env.JWT_SECRET || 'dev_secret'); } catch { return res.status(401).json({ error: 'Invalid token' }); }
-    if((payload.role||'user') !== 'admin') return res.status(403).json({ error: 'Forbidden' });
-    const rec = await AnalysisRecord.findById(req.params.id);
-    if(!rec) return res.status(404).json({ error: 'Record not found' });
-    if(!rec.email || !rec.url) return res.status(400).json({ error: 'Record missing email or url' });
-    // Enqueue new task via queue (bypass duplicate detection by appending timestamp to generate unique taskId)
-    const uniqueUrl = rec.url; // keep same normalized URL; duplicate logic uses taskId(email+url)
-    // Temporarily modify queue to allow re-run: generate taskId with random suffix
-    const originalGenerate = analysisQueue.generateTaskId?.bind(analysisQueue);
-    const suffix = '-' + Date.now().toString(36);
-    analysisQueue.generateTaskId = (email, url) => originalGenerate ? originalGenerate(email, url) + suffix : (email + ':' + url + suffix);
-    const { duplicate, taskId } = await analysisQueue.addTask(rec.email, uniqueUrl, null);
-    // Restore original generator
-    if (originalGenerate) analysisQueue.generateTaskId = originalGenerate;
-    if(duplicate) return res.status(409).json({ error: 'Duplicate task (unexpected)' });
-    // Optionally link old record to new task
-    rec.rerunTaskId = taskId;
-    await rec.save();
-    res.json({ success: true, message: 'Analysis re-queued', newTaskId: taskId });
-  } catch(e){
-    console.error('Rerun analysis error:', e.message);
+    if ((payload.role || 'user') !== 'admin') return res.status(403).json({ error: 'Forbidden' });
+
+    const record = await AnalysisRecord.findById(req.params.id);
+    if (!record) return res.status(404).json({ error: 'Record not found' });
+    if (!record.email || !record.url) return res.status(400).json({ error: 'Record missing email or url' });
+
+    const rerunResult = await analysisQueue.rerunExisting(record);
+    if (!rerunResult.accepted) {
+      return res.status(409).json({ error: rerunResult.reason || 'Task already queued or processing' });
+    }
+    res.json({ success: true, message: 'Analysis re-queued in-place', taskId: record.taskId });
+  } catch (e) {
+    console.error('Rerun analysis (in-place) error:', e);
     res.status(500).json({ error: 'Server error' });
   }
 });
@@ -246,23 +240,88 @@ class AnalysisQueue {
     this.taskStatuses = new Map();
   }
 
+  /**
+   * Re-queue an existing analysis record without creating a new DB record.
+   * Resets status/emailStatus and enqueues a fresh task using the same taskId.
+   * @param {Document} record Mongoose AnalysisRecord document
+   * @returns {Promise<{accepted:boolean, reason?:string}>}
+   */
+  async rerunExisting(record) {
+    const taskId = record.taskId;
+    // Prevent duplicate queueing if already in progress or queued
+    if (this.currentTask?.taskId === taskId) {
+      return { accepted: false, reason: 'Task currently processing' };
+    }
+    if (this.queue.some(t => t.taskId === taskId)) {
+      return { accepted: false, reason: 'Task already queued' };
+    }
+
+    // Reset persistent record fields (retain createdAt for chronology)
+    try {
+      await AnalysisRecord.updateOne({ _id: record._id }, {
+        $set: {
+          status: 'queued',
+          emailStatus: 'pending',
+          emailError: null,
+          failureReason: null,
+          reportDirectory: null,
+          updatedAt: new Date()
+        }
+      });
+    } catch (e) {
+      console.warn(`⚠️ Failed to update existing record for rerun ${taskId}:`, e.message);
+      return { accepted: false, reason: 'DB update failed' };
+    }
+
+    // Refresh in-memory status map entry
+    const existingMem = this.taskStatuses.get(taskId) || {
+      taskId,
+      email: record.email,
+      url: record.url,
+      createdAt: record.createdAt ? record.createdAt.getTime() : Date.now()
+    };
+    this.taskStatuses.set(taskId, {
+      ...existingMem,
+      status: 'queued',
+      emailStatus: 'pending',
+      emailError: null,
+      reportDirectory: null,
+      updatedAt: Date.now()
+    });
+
+    // Build task object (no HTTP res for admin-triggered rerun; background)
+    const task = {
+      taskId,
+      email: record.email,
+      url: record.url,
+      res: null,
+      queuedAt: Date.now(),
+      retryCount: 0
+    };
+
+    // Enqueue safely
+    while (this.queueLock) {
+      await this.sleep(50);
+    }
+    this.queueLock = true;
+    this.queue.push(task);
+    this.queueLock = false;
+
+    console.log(`♻️ Rerun queued in-place for task ${taskId} (email: ${record.email}, url: ${record.url})`);
+    this.logQueueStatus();
+    if (!this.isProcessing) setImmediate(() => this.processQueue());
+    return { accepted: true };
+  }
+
   async addTask(email, url, res) {
     const normalizedUrl = this.normalizeUrl(url);
     const taskId = this.generateTaskId(email, normalizedUrl);
-
+    // With unique taskIds per request we allow same email+URL to enqueue multiple analyses.
+    // (A rare collision would still be caught here.)
     const existing = this.taskStatuses.get(taskId);
-    if (existing && ['queued','processing','sending_email'].includes(existing.status)) {
-      console.log(`⚠️ Duplicate request detected for ${normalizedUrl} by ${email}. Rejecting.`);
-      // Respond duplicate if real response object
-      if (res && res.status) {
-        res.status(409).json({
-          success: false,
-            error: 'This URL is already being processed for this email.',
-            taskId,
-            status: existing
-        });
-      }
-      return { duplicate: true, taskId };
+    if (existing) {
+      console.log(`⚠️ Unexpected taskId collision for ${normalizedUrl} by ${email}. Forcing uniqueness.`);
+      return this.addTask(email, `${normalizedUrl}?r=${Date.now()}`, res); // recurse with slight URL variation
     }
 
     const task = {
@@ -469,11 +528,21 @@ class AnalysisQueue {
         }
       }
       
-      if (!task.res.headersSent) {
-        // Add processing time to response
-        result.processingTimeMs = Date.now() - startTime;
-        result.taskId = task.taskId;
-        task.res.json(result);
+      if (task.res) {
+        if (!task.res.headersSent) {
+          // Add processing time to response
+          result.processingTimeMs = Date.now() - startTime;
+          result.taskId = task.taskId;
+          try {
+            task.res.json(result);
+          } catch (respErr) {
+            console.warn(`⚠️ Failed to send success response for task ${task.taskId}:`, respErr.message);
+          }
+        } else {
+          console.log(`ℹ️ Response already sent for task ${task.taskId} (success path).`);
+        }
+      } else {
+        console.log(`🛰️ Task ${task.taskId} is background (no HTTP response to send).`);
       }
       
       console.log(`✅ Task ${task.taskId} completed successfully in ${Date.now() - startTime}ms`);
@@ -484,13 +553,23 @@ class AnalysisQueue {
     } catch (error) {
       console.error(`💥 Task ${task.taskId} failed:`, error.message);
       
-  if (!task.res.headersSent) {
-        task.res.status(500).json({
-          success: false,
-          error: 'Analysis failed due to server error',
-          taskId: task.taskId,
-          processingTimeMs: Date.now() - startTime
-        });
+  if (task.res) {
+        if (!task.res.headersSent) {
+          try {
+            task.res.status(500).json({
+              success: false,
+              error: 'Analysis failed due to server error',
+              taskId: task.taskId,
+              processingTimeMs: Date.now() - startTime
+            });
+          } catch (respErr) {
+            console.warn(`⚠️ Failed to send error response for task ${task.taskId}:`, respErr.message);
+          }
+        } else {
+          console.log(`ℹ️ Response already sent for task ${task.taskId} (error path).`);
+        }
+      } else {
+        console.log(`🛰️ Task ${task.taskId} failed in background (no HTTP response to send).`);
       }
   this.updateStatus(task.taskId, { status: 'failed' });
     }
@@ -515,12 +594,22 @@ class AnalysisQueue {
     }
 
     // Final failure
-    if (!task.res.headersSent) {
-      task.res.status(500).json({
-        success: false,
-        error: 'Analysis failed after retries',
-        taskId: task.taskId
-      });
+    if (task.res) {
+      if (!task.res.headersSent) {
+        try {
+          task.res.status(500).json({
+            success: false,
+            error: 'Analysis failed after retries',
+            taskId: task.taskId
+          });
+        } catch (respErr) {
+          console.warn(`⚠️ Failed to send final failure response for task ${task.taskId}:`, respErr.message);
+        }
+      } else {
+        console.log(`ℹ️ Response already sent earlier for task ${task.taskId} (final failure).`);
+      }
+    } else {
+      console.log(`🛰️ Task ${task.taskId} reached final failure in background (no HTTP response).`);
     }
   this.updateStatus(task.taskId, { status: 'failed' });
   }
@@ -545,8 +634,13 @@ class AnalysisQueue {
   }
 
   generateTaskId(email, url) {
-  const data = `${email}:${url}`; // stable hash for duplicate detection
-  return crypto.createHash('md5').update(data).digest('hex').substring(0, 10);
+  // Previously this was a stable hash of email+url to merge duplicate in-flight requests.
+  // Requirement change: we want EACH request (even same email+URL) to appear as a new history entry.
+  // So we add a high-entropy, time-based component ensuring uniqueness.
+  const nowPart = Date.now().toString(36);
+  const randPart = crypto.randomBytes(3).toString('hex');
+  const data = `${email}:${url}:${nowPart}:${randPart}`;
+  return crypto.createHash('md5').update(data).digest('hex').substring(0, 12);
   }
 
   isRetryableError(error) {
